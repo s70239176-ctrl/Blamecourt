@@ -1,0 +1,15 @@
+# NOTE: this schema was not verified against the exact gltest version in
+# use -- it mirrors the shape referenced in gltest's own CLI/config docs
+# at authoring time, but hasn't been run against a real `gltest` install.
+# If `gltest` rejects this file, check `gltest --help` / the installed
+# package's own example config and adjust keys accordingly; nothing else
+# in this repo depends on this file's exact shape.
+networks:
+  studionet:
+    default: true
+
+contracts:
+  path: contracts
+
+tests:
+  path: tests/direct

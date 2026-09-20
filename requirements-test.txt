@@ -1,0 +1,5 @@
+# Not pinned to exact versions -- gltest's own package determines the
+# compatible genlayer-py / pytest versions. Install per gltest's own
+# documentation if this fails to resolve.
+gltest
+pytest

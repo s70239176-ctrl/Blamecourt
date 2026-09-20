@@ -1,0 +1,11 @@
+The implementer's repo artifact must be fetchable and address the spec.
+Blame QA if they signed off on work that later proves broken. Blame the
+publisher if implementation and QA both check out but the publish URL
+404s. Blame the researcher only if the spec itself is ambiguous or
+self-contradictory (cause = spec_gap). If two or more roles are clearly
+and independently at fault, use cause "multi" and split blame across
+them -- do not use "non_delivery" in that case even if each agent's
+individual reason was a delivery failure. Use cause "non_delivery" only
+when no agent produced any usable artifact at all. A role with zero
+submitted artifacts must be treated identically to a role whose artifact
+failed to fetch -- both mean that role delivered nothing usable.

@@ -1,0 +1,14 @@
+{
+  "cause": "implement_fail",
+  "evidence_used": [
+    "https://raw.githubusercontent.com/octocat/Hello-World/master/README",
+    "https://raw.githubusercontent.com/octocat/Hello-World/master/THIS-FILE-DOES-NOT-EXIST"
+  ],
+  "rationale": "The rubric states that if the implementer repo artifact is FETCH_FAILED while every other agent artifact fetches successfully, the cause is implement_fail with 10000 bps to the implementer. The researcher, QA, and publisher artifacts all have usable excerpts, while the implementer repo artifact is exactly FETCH_FAILED.",
+  "shares": {
+    "0x3779aef2f9b6cd470332a9dc2a3330475b507644": 0,
+    "0x5f512824eb3785fa3f3532158c288a27b9b5fc58": 0,
+    "0x7255ffa64b297c3af0064ec56f07beef1c04f2ef": 10000,
+    "0x790695ee6e46e813b99c50069c0e608acd1a7e3a": 0
+  }
+}
