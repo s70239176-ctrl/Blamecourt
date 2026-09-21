@@ -89,9 +89,11 @@ def test_case_a_implement_fail(default_account, accounts):
         "nondet_exec_prompt": {IMPLEMENTER: json.dumps(verdict_a)}
     }
     mock_web: MockedWebResponse = {
-        SPEC_URL: {"status": 200, "body": "Spec: implement endpoint X per ticket."},
-        QA_LOG_URL: {"status": 200, "body": "QA: blocked on missing API from implementer."},
-        REPO_URL: {"status": 404, "body": ""},  # -> FETCH_FAILED in the contract
+        "nondet_web_request": {
+            SPEC_URL: {"method": "GET", "status": 200, "body": "Spec: implement endpoint X per ticket."},
+            QA_LOG_URL: {"method": "GET", "status": 200, "body": "QA: blocked on missing API from implementer."},
+            REPO_URL: {"method": "GET", "status": 404, "body": ""},  # -> FETCH_FAILED in the contract
+        }
     }
     validators = _validators_with(mock_response, mock_web)
     transaction_context = {
@@ -160,10 +162,12 @@ def test_case_b_publish_fail(default_account):
         "nondet_exec_prompt": {PUBLISHER: json.dumps(verdict_b)}
     }
     mock_web: MockedWebResponse = {
-        SPEC_URL: {"status": 200, "body": "Spec: publish the build artifact."},
-        REPO_URL: {"status": 200, "body": "Implementation complete, matches spec."},
-        QA_LOG_URL: {"status": 200, "body": "QA: signed off, all checks pass."},
-        PUBLISH_URL: {"status": 404, "body": ""},
+        "nondet_web_request": {
+            SPEC_URL: {"method": "GET", "status": 200, "body": "Spec: publish the build artifact."},
+            REPO_URL: {"method": "GET", "status": 200, "body": "Implementation complete, matches spec."},
+            QA_LOG_URL: {"method": "GET", "status": 200, "body": "QA: signed off, all checks pass."},
+            PUBLISH_URL: {"method": "GET", "status": 404, "body": ""},
+        }
     }
     validators = _validators_with(mock_response, mock_web)
     transaction_context = {
@@ -231,9 +235,11 @@ def test_case_c_multi_and_invalid_shares_rejected(default_account):
         "nondet_exec_prompt": {QA: json.dumps(bad_verdict)}
     }
     mock_web: MockedWebResponse = {
-        SPEC_URL: {"status": 200, "body": "Spec requires full test coverage."},
-        REPO_URL: {"status": 200, "body": "Implementation present, tests thin."},
-        QA_LOG_URL: {"status": 200, "body": "QA: approved without running full suite."},
+        "nondet_web_request": {
+            SPEC_URL: {"method": "GET", "status": 200, "body": "Spec requires full test coverage."},
+            REPO_URL: {"method": "GET", "status": 200, "body": "Implementation present, tests thin."},
+            QA_LOG_URL: {"method": "GET", "status": 200, "body": "QA: approved without running full suite."},
+        }
     }
     validators = _validators_with(mock_response, mock_web)
     transaction_context = {

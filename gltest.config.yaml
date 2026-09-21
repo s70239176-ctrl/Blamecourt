@@ -1,15 +1,18 @@
-# NOTE: this schema was not verified against the exact gltest version in
-# use -- it mirrors the shape referenced in gltest's own CLI/config docs
-# at authoring time, but hasn't been run against a real `gltest` install.
-# If `gltest` rejects this file, check `gltest --help` / the installed
-# package's own example config and adjust keys accordingly; nothing else
-# in this repo depends on this file's exact shape.
+# Schema confirmed against the genlayer-test package's own PyPI docs
+# (an earlier version of this file was an unverified guess -- this one
+# matches https://pypi.org/project/genlayer-test/'s documented example).
 networks:
+  default: localnet
+
+  localnet:
+    url: "http://127.0.0.1:4000/api"
+    leader_only: false
+
   studionet:
-    default: true
+    # Pre-configured by genlayer-test -- accounts auto-generated
 
-contracts:
-  path: contracts
+paths:
+  contracts: "contracts"
+  artifacts: "artifacts"
 
-tests:
-  path: tests/direct
+environment: .env

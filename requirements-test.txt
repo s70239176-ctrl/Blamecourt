@@ -1,5 +1,5 @@
-# Not pinned to exact versions -- gltest's own package determines the
-# compatible genlayer-py / pytest versions. Install per gltest's own
-# documentation if this fails to resolve.
-gltest
+# Confirmed against PyPI: the package is `genlayer-test` (it installs the
+# `gltest` module/CLI -- `gltest` alone is not an installable package
+# name; `pip install gltest` fails with "No matching distribution").
+genlayer-test
 pytest
