@@ -26,6 +26,12 @@ MAX_ARTIFACTS_PER_JOB = 16
 SPEC_TRUNCATE_CHARS = 20000
 ARTIFACT_TRUNCATE_CHARS = 8000
 SHARE_BPS_TOTAL = 10000
+# Payout-driving shares are canonicalized (see `_quantize_shares`) onto a
+# grid this wide *before* validators compare them, so consensus agreement
+# and the money that agreement authorizes are the same numbers -- not an
+# agreement-within-tolerance on one set of numbers that then pays out
+# whichever leader's un-quantized numbers happened to be accepted.
+SHARE_BUCKET_BPS = 1000
 APPEAL_SHARE_TOLERANCE_BPS = 500
 MAX_APPEALS = 1
 
@@ -133,6 +139,56 @@ def _coerce_to_json_obj(raw):
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="replace")
     return json.loads(_extract_json_text(raw if isinstance(raw, str) else str(raw)))
+
+
+def _quantize_shares(shares: dict, bucket_bps: int, total_bps: int) -> dict:
+    """Collapse a raw, LLM-produced bps allocation onto a coarse fixed grid
+    (multiples of `bucket_bps`) via the largest-remainder method, so that
+    the numbers validators compare -- and the numbers `_compute_distribution`
+    actually pays out -- are drawn from a small, discrete set instead of the
+    full 0..10000 range. Two independent LLM calls reading the same
+    evidence virtually never agree bit-for-bit, but they overwhelmingly
+    land in the same bucket once quantized; when they genuinely don't
+    (a raw share sits right on a bucket boundary between the two runs),
+    that is a real disagreement about blame, not rounding noise, and
+    letting the equivalence check reject it is correct, not a false
+    negative to be tolerated away.
+
+    Only ever called on a `shares` dict that has already passed the
+    key-set/non-negative/sums-to-`total_bps` checks -- it does not
+    re-validate those, it only re-grids values that are already sane, and
+    it is deterministic given its input: same raw shares in, same
+    canonical allocation out, every time, on either side of a comparison."""
+    if not shares:
+        return {}
+    addrs = list(shares.keys())
+    units = {a: int(shares[a]) // bucket_bps for a in addrs}
+    remainder = {a: int(shares[a]) - units[a] * bucket_bps for a in addrs}
+    target_units = total_bps // bucket_bps
+    deficit = target_units - sum(units.values())
+
+    # Hand out the +1 bucket bumps needed to reach target_units to the
+    # addresses with the largest leftover bps first (classic largest-
+    # remainder / Hamilton apportionment). Ties broken by address string
+    # so two runs over identical input always pick the same winners.
+    give = sorted(addrs, key=lambda a: (-remainder[a], a))
+    i = 0
+    while deficit > 0 and i < len(give):
+        units[give[i]] += 1
+        deficit -= 1
+        i += 1
+
+    # Symmetric case: rounding down left one bucket too many -- claw one
+    # back from the smallest-remainder addresses first.
+    take = sorted(addrs, key=lambda a: (remainder[a], a))
+    j = 0
+    while deficit < 0 and j < len(take):
+        if units[take[j]] > 0:
+            units[take[j]] -= 1
+            deficit += 1
+        j += 1
+
+    return {a: units[a] * bucket_bps for a in addrs}
 
 
 def _fetch_evidence_pack(spec_url, artifacts):
@@ -330,6 +386,7 @@ class BlameCourt(gl.Contract):
         agents_desc = [
             {"addr": addr, "role": a["role"]} for addr, a in job["agents"].items()
         ]
+        known_agent_addrs = set(job["agents"].keys())
 
         def produce_verdict() -> str:
             # Calls the module-level helper functions above, NOT
@@ -357,6 +414,37 @@ class BlameCourt(gl.Contract):
                         + snippet
                     ),
                 }
+
+            # Canonicalize the payout-driving `shares` field onto the fixed
+            # bps grid BEFORE this verdict is handed to the equivalence
+            # check, so what validators compare is what actually gets paid.
+            # Only attempted when the raw shares already look sane (right
+            # keys, non-negative, sums to ~10000) -- anything else is left
+            # untouched and falls through to the existing hard-fail checks
+            # in `_adjudicate_once` after consensus, unchanged.
+            raw_shares = parsed.get("shares")
+            if isinstance(raw_shares, dict):
+                normalized = {}
+                sane = True
+                for k, v in raw_shares.items():
+                    try:
+                        iv = int(v)
+                    except (TypeError, ValueError):
+                        sane = False
+                        break
+                    if iv < 0:
+                        sane = False
+                        break
+                    normalized[_norm_addr(k)] = iv
+                if (
+                    sane
+                    and set(normalized.keys()) == known_agent_addrs
+                    and abs(sum(normalized.values()) - SHARE_BPS_TOTAL) <= 1
+                ):
+                    parsed["shares"] = _quantize_shares(
+                        normalized, SHARE_BUCKET_BPS, SHARE_BPS_TOTAL
+                    )
+
             return _canon(parsed)
 
         # Comparative equivalence: validators independently re-run the fetch
@@ -374,10 +462,15 @@ class BlameCourt(gl.Contract):
             "2. Their `shares` objects have the same set of address keys "
             "(compare address keys CASE-INSENSITIVELY -- '0xAbC...' and "
             "'0xabc...' refer to the same address and must be treated as the "
-            "same key), each agent's two share values differ by at most 500 "
-            "basis points, and both `shares` objects individually sum to 10000 "
-            "(+/- rounding of at most 1 due to integer division is "
-            "acceptable).\n"
+            "same key). Each verdict's `shares` values have already been "
+            "canonicalized by its own producer onto a fixed "
+            + str(SHARE_BUCKET_BPS) + "-bps grid before you see them -- "
+            "compare those values for EXACT equality, address by address. Do "
+            "NOT treat two different values as 'close enough'; the values you "
+            "are comparing are the same numbers that determine the payout, so "
+            "a difference of even one bucket is a real disagreement about "
+            "blame, not rounding noise, and must make the verdicts "
+            "non-equivalent.\n"
             "3. Every URL in `evidence_used` in EITHER verdict actually appears "
             "in the evidence pack's known URL list; a verdict that cites a URL "
             "not in the known list is INVALID and must NOT be treated as "
@@ -639,6 +732,13 @@ class BlameCourt(gl.Contract):
 
         new_verdict = self._adjudicate_once(job)
 
+        # Both verdicts' shares are already canonicalized onto the
+        # SHARE_BUCKET_BPS grid (see `_quantize_shares`), so any two
+        # distinct values differ by at least SHARE_BUCKET_BPS (1000) --
+        # this tolerance check is therefore already an exact-bucket
+        # comparison, not a fuzzy one; it is kept as a named tolerance
+        # (rather than `!=`) only so a future change to either constant
+        # can't silently reopen the gap this canonicalization closes.
         same_cause = new_verdict["cause"] == old_verdict["cause"]
         same_shares = True
         for addr in job["agents"].keys():

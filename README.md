@@ -102,9 +102,14 @@ JSON. `strict_eq` would make honest validators disagree by construction.
 
 Validators are told two verdicts are equivalent iff:
 - `cause` is an identical string;
-- `shares` cover the same agent addresses (compared case-insensitively),
-  each value is within 500 bps of the other verdict's, and both sum to
-  10000 (±1 for rounding);
+- `shares` cover the same agent addresses (compared case-insensitively)
+  and are, address by address, EXACTLY equal — each producer
+  canonicalizes its own raw shares onto a fixed 1000-bps grid (largest-
+  remainder apportionment) before this comparison, so the numbers being
+  compared are the same numbers `_compute_distribution` will pay out; a
+  tolerance on the *raw* numbers can't bound the payout once only one
+  side's numbers are the ones actually spent, so none is used here (see
+  [docs/CONSENSUS.md](docs/CONSENSUS.md));
 - every `evidence_used` URL in either verdict was actually part of the
   fetched evidence pack — a citation of an unfetched URL invalidates that
   verdict, it does not just make it "different";

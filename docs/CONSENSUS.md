@@ -16,13 +16,48 @@ that tells validators two verdicts are equivalent iff:
 1. `cause` fields are identical strings.
 2. `shares` objects cover the same agent addresses — **compared
    case-insensitively**, since LLMs sometimes reformat hex address casing
-   (e.g. to an EIP-55 checksum) even when explicitly told not to — each
-   agent's two share values differ by at most 500 bps, and both sum to
-   10000 (±1 for integer rounding).
+   (e.g. to an EIP-55 checksum) even when explicitly told not to — and,
+   address by address, are **EXACTLY equal**.
 3. Every `evidence_used` URL in either verdict actually appears in the
    evidence pack's known-URL list. A verdict citing an unfetched URL is
    invalid, not merely "different."
 4. `rationale` wording is ignored entirely.
+
+### Why exact equality on `shares`, not a numeric tolerance
+
+An earlier revision let two verdicts' `shares` differ by up to 500 bps
+per agent and still count as equivalent. That tolerance was meant to
+absorb harmless LLM noise, but `shares` is also the *only* input to
+`_compute_distribution` — the field that determines how much of the
+escrow each agent is actually paid. Whichever raw verdict got accepted
+(typically the leader's) was paid out as-is, tolerance and all, so two
+runs that were "equivalent" by that rule could legitimately move up to
+5% of the escrow (500 bps) per agent to a different party depending on
+nothing but which leader's numbers happened to be the one on-chain. A
+tolerance on the comparison doesn't bound the payout at all once only
+one side's raw numbers are the ones that get spent.
+
+The fix is not to compare more loosely or more strictly on the *raw*
+numbers — any fixed-tolerance comparison on raw bps has this same
+problem, since two raw shares within tolerance of each other can still
+sit on opposite sides of an arbitrary payout threshold. Instead,
+`produce_verdict()` canonicalizes its own `shares` — once it has
+confirmed they already look sane (right keys, non-negative, sums to
+~10000) — onto a fixed `SHARE_BUCKET_BPS` (1000) grid via
+`_quantize_shares`, a deterministic largest-remainder apportionment, in
+`contracts/blamecourt.py`, *before* the verdict is handed to
+`prompt_comparative`. Two independent LLM calls over the same evidence
+almost always quantize to the identical allocation even though their raw
+bps never matched exactly; validators then compare those canonical
+values for exact equality. Whichever verdict passes consensus, its
+`shares` were already computed by the same deterministic function that
+will be used for `_compute_distribution` — so "equivalent" and "same
+payout" are now the same claim, not two different ones a loose numeric
+tolerance let drift apart. When two honest runs genuinely straddle a
+bucket boundary, quantization makes them disagree outright rather than
+silently averaging into whichever one happened to be the leader — that
+is a real disagreement about blame surfacing as a rejected/retried
+adjudication, not a bug to tolerate away.
 
 ## Deterministic post-consensus validation
 
