@@ -215,7 +215,7 @@ See `scripts/deploy_studionet.sh` for a minimal helper, and
 `SUBMISSION.md` for this revision's actual verified deploy/adjudicate
 evidence.
 
-**Studio deployment of this revision:** `0x987165A94d2E865fd04291Dd495ec0a4c719740b` (studionet). Its source
+**Studio deployment of this revision:** `0x8202BaA1C97FABB3824BACD82BA8FB53d92d18D4` (studionet). Its source
 can be re-checked against `contracts/blamecourt.py` with the
 `gen_getContractCode` RPC call (base64-encoded) — see `SUBMISSION.md`.
 

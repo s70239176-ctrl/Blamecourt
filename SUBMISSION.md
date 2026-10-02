@@ -144,19 +144,44 @@ the scenario's predicted verdict exactly:
 
 ## Deployment
 
-Studio (studionet) address of the current revision (the escrow-safety
-revision, with `finalize` and `get_ledger`):
+Studio (studionet) address of the current revision (commit `1d89fda`):
 
 ```
-0x987165A94d2E865fd04291Dd495ec0a4c719740b
+0x8202BaA1C97FABB3824BACD82BA8FB53d92d18D4
 ```
 
 This is independently checkable rather than asserted. Against
 `https://studio.genlayer.com/api`, `gen_getContractSchema` for that address
 lists the 13 public methods in `contracts/blamecourt.py`, and
 `gen_getContractCode` returns the contract source (base64), which was
-compared with this repo's `contracts/blamecourt.py` and is identical. The
-verdict below came from an earlier deployment of the low-ambiguity
+compared with this repo's `contracts/blamecourt.py` and is identical (it uses
+`run_nondet_unsafe` + `_same_decision` and `emit_transfer`; it has no
+`prompt_comparative` or `eth_send`).
+
+### Live verification on that address
+
+`BLAMECOURT_ADDRESS=` the address above `pytest tests/live -v --network
+studionet` ran against it: 3 passed, 39 transactions, real validators and a
+real LLM, no mocks. Only `genvm_datetime` was overridden so the appeal window
+could be exercised. The jobs are `gate-<ts>`, `fin-<ts>` and `app-<ts>`.
+
+| test | what it confirmed on-chain |
+|---|---|
+| `test_flag_is_gated_and_bonds_and_bad_deadlines_are_refused` | `create_job` rejects a `bond` field, a malformed agent address, a past deadline and an unparseable deadline. `flag_failed` reverts `cannot flag yet` and `adjudicate` reverts `must be flagged` with nothing submitted and with 3 of 4 agents submitted; the flag succeeds once all four have submitted (`flag_reason: all_submitted`). |
+| `test_finalize_path_on_real_validators` | A real-LLM `adjudicate` reaches consensus; stored shares sum to 10000 and are multiples of 1000. Afterwards every credit is unchanged, `withdraw` reverts `nothing to withdraw`, `finalize` reverts `still open` at +10 min and at exactly +3600 s, `appeal` reverts `window has closed` at +3601 s. `finalize` then succeeds once, a second `finalize` is refused, credits equal the canonical verdict's distribution, and every holder's `withdraw` (the `emit_transfer` path) clears their balance with `total_withdrawn` rising by exactly the amount owed. |
+| `test_appeal_path_on_real_validators_never_overpays` | An appeal inside the window settles the job once: credits equal escrow + bond (never more), `total_in` rises by exactly the bond, a second appeal and a second `finalize` are both refused. |
+
+Final ledger of that contract after the run (`get_ledger`): `total_in` 300500
+>= `total_credited` 200500 >= `total_withdrawn` 100000. The gap between
+`total_in` and `total_credited` is the `gate-<ts>` job's 100000 escrow, which
+was never judged or settled; the gap between credited and withdrawn is the
+`app-<ts>` job's payouts, which were credited but not withdrawn.
+
+Not covered live: an appeal that *changes* the verdict (the real LLM re-run
+cannot be forced to disagree). That replace-not-add behaviour is covered by
+`tests/unit/test_money_flow.py`, including 200 randomized scenarios.
+
+The verdict below came from an earlier deployment of the low-ambiguity
 walkthrough, not from this address.
 
 ## Known open issue: "transaction ended undetermined"
