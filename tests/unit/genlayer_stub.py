@@ -53,7 +53,7 @@ class Chain:
 
     def reset(self):
         self.datetime = "2030-01-01T00:00:00Z"
-        self.sent = []  # (address, amount) for every gl.eth_send
+        self.sent = []  # (address, amount) for every emit_transfer
         self.web = {}  # url -> body; missing url raises (-> FETCH_FAILED)
         self.llm = lambda prompt: "{}"  # prompt -> raw LLM string
 
@@ -75,15 +75,21 @@ def _prompt_comparative(fn, principle=""):
     return fn()
 
 
-def _eth_send(addr, amount):
-    chain.sent.append((str(addr), int(amount)))
+class _ContractAt:
+    def __init__(self, addr):
+        self.addr = addr
+
+    def emit_transfer(self, *, value, on="finalized"):
+        if value <= 0:
+            raise ValueError("value must be greater than 0 for emit_transfer")
+        chain.sent.append((str(self.addr), int(value)))
 
 
 gl = types.SimpleNamespace(
     Contract=_Contract,
     public=_Public,
     message=_Message,
-    eth_send=_eth_send,
+    get_contract_at=_ContractAt,
     eq_principle=types.SimpleNamespace(prompt_comparative=_prompt_comparative),
     nondet=types.SimpleNamespace(
         web=types.SimpleNamespace(render=_render), exec_prompt=_exec_prompt

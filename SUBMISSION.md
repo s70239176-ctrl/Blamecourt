@@ -22,8 +22,11 @@ isolated to a small, commented spot in `contracts/blamecourt.py`:
    revision probed `gl.message.chain_datetime`/`datetime`/`timestamp`, none
    of which exist, so it silently never enforced a deadline. The clock now
    hard-fails if unreadable instead of disabling deadlines.
-3. **Outbound value transfer in `withdraw()`** — `gl.eth_send(addr,
-   amount)`.
+3. **Outbound value transfer in `withdraw()`** — `gl.get_contract_at(addr)
+   .emit_transfer(value=...)`. An earlier revision called `gl.eth_send`,
+   which does not exist in the SDK: `withdraw()` raised `AttributeError` on
+   a real chain, so no payout could ever be collected. Found by running the
+   live Studio tests; the in-process mocks could not see it.
 4. **Nested structured storage** — rather than guess at whether
    `@allow_storage`-decorated dataclasses can be `TreeMap` values on this
    build, every job is one canonical-JSON string keyed by `job_id`. See

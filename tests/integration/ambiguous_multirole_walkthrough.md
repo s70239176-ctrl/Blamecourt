@@ -174,7 +174,7 @@ before slashing; see `docs/VERDICT_FORMAT.md`).
 Expect: their `credits` entry zeroes out and `get_credit` for that address
 returns `0` afterward. When everyone has withdrawn, `get_ledger()` shows
 `total_in == total_credited == total_withdrawn`. (If Studio's simulated
-chain doesn't actually move GEN on `gl.eth_send` the way a real network
+chain doesn't actually move GEN on `emit_transfer` the way a real network
 would, that's expected in a local/simulator context — the accounting side
 still updates correctly.)
 

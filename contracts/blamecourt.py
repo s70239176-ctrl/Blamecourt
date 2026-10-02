@@ -870,7 +870,12 @@ class BlameCourt(gl.Contract):
         self.total_withdrawn = int(self.total_withdrawn) + amount
         if int(self.total_withdrawn) > int(self.total_credited):
             raise Exception("withdrawal exceeds credited funds")
-        gl.eth_send(gl.message.sender_address, amount)
+        # The SDK's only outbound-value primitive. The transfer message is
+        # emitted when this transaction finalizes, so it cannot be paid out
+        # and then rolled back by an appeal of the withdraw itself.
+        gl.get_contract_at(gl.message.sender_address).emit_transfer(
+            value=u256(amount)
+        )
 
     @gl.public.view
     def get_job(self, job_id: str) -> str:
