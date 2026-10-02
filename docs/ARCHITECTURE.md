@@ -5,12 +5,34 @@
 ```
 open --submit_artifact--> submitted --flag_failed / past deadline-->
 ready_for_adjudication --adjudicate--> adjudicated
-    --appeal--> appealed --(internal)--> final
+    --finalize (window closed, no appeal)--> final
+    --appeal  (inside the window)---------> final
 ```
 
-`adjudicated` is a fine terminal state on its own — its distribution has
-already been applied. `appeal()` may move a job to `appealed` and then
-`final` at most once (`MAX_APPEALS = 1`).
+**Flagging is gated.** `flag_failed` only succeeds once the job's deadline
+has validly passed (`deadline_passed`) or every registered agent has
+submitted at least one artifact (`all_submitted`). Before that, a missing
+artifact is not evidence of anything, so nobody can rush a job into
+adjudication and have silence judged as non-delivery. An unflagged job can
+also be adjudicated directly once its deadline has passed. The deadline is
+parsed at `create_job` (it must be a valid ISO-8601 instant in the future)
+and compared against the transaction time from `gl.message_raw["datetime"]`;
+if either cannot be read, the call fails rather than skipping the check.
+
+**Nothing is paid at adjudication.** `adjudicate` stores the verdict and
+opens an appeal window of `APPEAL_WINDOW_SECONDS` (3600). No credit is
+written until the verdict is final:
+
+- `finalize(job_id)` — anyone, after the window closes with no appeal.
+- `appeal(job_id)` — a registered agent, inside the window, with a bond.
+  The re-run verdict *replaces* the original (or the original stands and
+  the bond goes to the creator). Either way the job settles immediately,
+  once, from the single final verdict.
+
+Because credits are only ever written from a final verdict, an upheld
+appeal never has to reverse anything: there is nothing to claw back, and
+the escrow is distributed exactly once (`_settle` refuses a second run and
+checks that the payouts sum to the escrow). `MAX_APPEALS = 1`.
 
 ## Storage shape
 
@@ -30,7 +52,18 @@ compared, with no extra bookkeeping.
 
 Payouts are tracked separately in a pull-payment ledger,
 `TreeMap[str, u256] credits`, withdrawn via `withdraw()`. Money is never
-pushed out of `adjudicate()`/`appeal()` directly.
+pushed out of `adjudicate()`/`appeal()` directly, and credits only exist
+after a job settles (see above).
+
+Three counters keep the books honest and are exposed by `get_ledger()`:
+`total_in` (every escrow and appeal bond received), `total_credited`
+(everything made withdrawable) and `total_withdrawn` (everything paid
+out). The contract enforces `total_withdrawn <= total_credited <=
+total_in` on every write, so it cannot promise or pay more than it holds.
+
+Agents are `{addr, role}` only. An earlier revision accepted a per-agent
+`bond` that was never collected or slashed; `create_job` now rejects
+`bond` (and any other unknown agent field) instead of silently ignoring it.
 
 Every address used as a dict key or compared against another address is
 passed through `_norm_addr()` (lowercased, whitespace-stripped) first —
@@ -80,14 +113,16 @@ editing this file.
 
 | Method | Decorator | Who can call | Notes |
 |---|---|---|---|
-| `create_job(job_id, spec_url, rubric, deadline, agents_json)` | `@gl.public.write.payable` | anyone | Locks `gl.message.value` as escrow. Rejects duplicate `job_id`. |
-| `submit_artifact(job_id, url, kind)` | `@gl.public.write` | a registered agent | Capped at 16 artifacts/job; deadline-gated when a time source is available. |
-| `flag_failed(job_id)` | `@gl.public.write` | creator or any agent | Moves the job to `ready_for_adjudication`. |
-| `adjudicate(job_id)` | `@gl.public.write` | anyone | Requires flagged or past-deadline; requires ≥1 artifact; not callable twice. |
-| `appeal(job_id)` | `@gl.public.write.payable` | a registered agent | Requires a bond; once per job; re-runs the full pipeline. |
-| `withdraw()` | `@gl.public.write` | anyone with a credit balance | Pull-payment pattern. |
+| `create_job(job_id, spec_url, rubric, deadline, agents_json)` | `@gl.public.write.payable` | anyone | Locks `gl.message.value` as escrow. Rejects duplicate `job_id`, a deadline that is unparseable or not in the future, malformed agent addresses, and any agent field other than `addr`/`role`. |
+| `submit_artifact(job_id, url, kind)` | `@gl.public.write` | a registered agent | Capped at 16 artifacts/job; rejected after the deadline. |
+| `flag_failed(job_id)` | `@gl.public.write` | creator or any agent | Only after the deadline has passed or every agent has submitted; otherwise reverts. Moves the job to `ready_for_adjudication`. |
+| `adjudicate(job_id)` | `@gl.public.write` | anyone | Requires flagged or past-deadline; not callable twice. Stores the verdict and opens the appeal window; pays nothing. |
+| `appeal(job_id)` | `@gl.public.write.payable` | a registered agent | Inside the appeal window only; requires a bond; once per job; re-runs the full pipeline and settles the job from the final verdict. |
+| `finalize(job_id)` | `@gl.public.write` | anyone | After the appeal window closes with no appeal; settles the job. |
+| `withdraw()` | `@gl.public.write` | anyone with a credit balance | Pull-payment pattern; balances exist only for settled jobs. |
 | `get_job(job_id) -> str` | `@gl.public.view` | anyone | Canonical JSON of the job. |
 | `get_verdict(job_id) -> str` | `@gl.public.view` | anyone | Canonical JSON of the verdict, or `"null"`. |
 | `get_status(job_id) -> str` | `@gl.public.view` | anyone | |
 | `get_credit(addr) -> u256` | `@gl.public.view` | anyone | `addr` is a plain `str`, normalized on lookup. |
 | `get_job_count() -> u256` | `@gl.public.view` | anyone | |
+| `get_ledger() -> str` | `@gl.public.view` | anyone | Canonical JSON of `total_in`, `total_credited`, `total_withdrawn`. |

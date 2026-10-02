@@ -1,6 +1,6 @@
 [
-  {"addr": "0x1000000000000000000000000000000000000a", "role": "researcher",  "bond": 500},
-  {"addr": "0x1000000000000000000000000000000000000b", "role": "implementer", "bond": 500},
-  {"addr": "0x1000000000000000000000000000000000000c", "role": "qa",          "bond": 500},
-  {"addr": "0x1000000000000000000000000000000000000d", "role": "publisher",   "bond": 500}
+  {"addr": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", "role": "researcher"},
+  {"addr": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2", "role": "implementer"},
+  {"addr": "0xa3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3", "role": "qa"},
+  {"addr": "0xa4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4", "role": "publisher"}
 ]

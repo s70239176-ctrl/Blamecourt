@@ -17,22 +17,42 @@ from documentation available while building this. Everything below is
 isolated to a small, commented spot in `contracts/blamecourt.py`:
 
 1. **Reading the value sent with a payable call** — `gl.message.value`.
-2. **Reading current chain time** — no confirmed accessor was found;
-   `_now_iso()` probes a few plausible `gl.message.*` attribute names and
-   degrades to "no deadline enforcement" if none exist, rather than
-   guessing wrong and hard-failing every transaction.
+2. **Reading current chain time** — `gl.message_raw["datetime"]` (an
+   ISO-8601 string; defined by the SDK's `MessageRawType`). An earlier
+   revision probed `gl.message.chain_datetime`/`datetime`/`timestamp`, none
+   of which exist, so it silently never enforced a deadline. The clock now
+   hard-fails if unreadable instead of disabling deadlines.
 3. **Outbound value transfer in `withdraw()`** — `gl.eth_send(addr,
    amount)`.
 4. **Nested structured storage** — rather than guess at whether
    `@allow_storage`-decorated dataclasses can be `TreeMap` values on this
    build, every job is one canonical-JSON string keyed by `job_id`. See
    `docs/ARCHITECTURE.md`.
-5. **Bond collection/slashing** — `agents_json` declares a `bond` per
-   agent, but this version does not collect those bonds on-chain from
-   each agent individually; the `escrow_total` distribution formula is
-   the sole money-movement path. Flagged as a noted extension point.
+5. **Agent bonds were removed.** `agents_json` used to declare a `bond`
+   per agent that was never collected or slashed. Agents are now
+   `{addr, role}` and `create_job` rejects `bond`. The only money paths are
+   the escrow distribution and the one-off appeal bond.
 6. **`gltest.config.yaml`'s exact schema** was not verified against a
    real `gltest` install — see the comment in that file.
+
+## Escrow-safety revision
+
+Review found three problems, all fixed in `contracts/blamecourt.py`:
+
+1. **Appeals could double-pay.** Credits were written at `adjudicate`, and
+   an upheld appeal "reversed" them by crediting a negative amount, which
+   `_credit` ignored — so the new distribution was added on top of the
+   original and the contract owed more than it held. Credits are now only
+   written from the final verdict (`finalize` after the appeal window, or
+   `appeal`), so nothing is ever reversed. `total_in >= total_credited >=
+   total_withdrawn` is enforced on every write.
+2. **Premature flagging.** `flag_failed` could be called at any time, and
+   the deadline check never fired (see API guess 2), so silence could be
+   judged as non-delivery immediately. `flag_failed` now requires a passed
+   deadline or that every agent has submitted.
+3. **Unused bond fields** — removed (API guess 5).
+
+`tests/unit/` covers each of these.
 
 ## Bugs hit and fixed during development (in order)
 
@@ -133,6 +153,8 @@ it's tunable.
 
 ```
 python scripts/preflight.py contracts/blamecourt.py
+pip install pytest
+pytest tests/unit -q
 pip install -r requirements-test.txt
 pytest tests/direct -q
 ```

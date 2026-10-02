@@ -62,17 +62,17 @@ not assign blame to any other agent in that scenario.
 you wrote down, keeping everything else character-for-character identical
 (one line, valid JSON, no trailing comma):
 ```json
-[{"addr":"ADDR_1","role":"researcher","bond":100},{"addr":"ADDR_2","role":"implementer","bond":100},{"addr":"ADDR_3","role":"qa","bond":100},{"addr":"ADDR_4","role":"publisher","bond":100}]
+[{"addr":"ADDR_1","role":"researcher"},{"addr":"ADDR_2","role":"implementer"},{"addr":"ADDR_3","role":"qa"},{"addr":"ADDR_4","role":"publisher"}]
 ```
 
 So if, say, your four Studio addresses were
-`0x1111111111111111111111111111111111aaaa`,
-`0x2222222222222222222222222222222222bbbb`,
-`0x3333333333333333333333333333333333cccc`, and
-`0x4444444444444444444444444444444444dddd`, the field you'd actually paste
+`0x111111111111111111111111111111111111aaaa`,
+`0x222222222222222222222222222222222222bbbb`,
+`0x333333333333333333333333333333333333cccc`, and
+`0x444444444444444444444444444444444444dddd`, the field you'd actually paste
 in is:
 ```json
-[{"addr":"0x1111111111111111111111111111111111aaaa","role":"researcher","bond":100},{"addr":"0x2222222222222222222222222222222222bbbb","role":"implementer","bond":100},{"addr":"0x3333333333333333333333333333333333cccc","role":"qa","bond":100},{"addr":"0x4444444444444444444444444444444444dddd","role":"publisher","bond":100}]
+[{"addr":"0x111111111111111111111111111111111111aaaa","role":"researcher"},{"addr":"0x222222222222222222222222222222222222bbbb","role":"implementer"},{"addr":"0x333333333333333333333333333333333333cccc","role":"qa"},{"addr":"0x444444444444444444444444444444444444dddd","role":"publisher"}]
 ```
 (That example is illustrative only — use your own real addresses, not
 these.)
@@ -108,6 +108,11 @@ into a 3-way failure).
 
 `job_id = "clear-test-001"`.
 
+This is allowed immediately because all four roles have submitted (the
+`all_submitted` condition; `get_job` shows `"flag_reason":"all_submitted"`).
+If any role had not submitted, it would revert with `cannot flag yet` until
+the deadline passed.
+
 ## 4. `adjudicate` (as any account)
 
 `job_id = "clear-test-001"`.
@@ -131,12 +136,30 @@ get_verdict("clear-test-001")  -> the JSON above (cause, shares may vary
                                    slightly in rationale wording, but
                                    cause and shares should match exactly
                                    given how tightly the rubric pins them)
+get_credit(ADDR_1..ADDR_4)     -> 0 for every address (nothing is payable
+                                   until the verdict is final)
+get_ledger()                   -> total_in=100000, total_credited=0
+```
+
+Then wait for the appeal window (1 hour after `adjudicate`; see
+`appeal_deadline_ts` in `get_job`) and call `finalize("clear-test-001")` as
+any account. Calling it sooner reverts with `appeal window is still open`.
+After `finalize`:
+
+```
+get_status("clear-test-001")   -> "final"
 get_credit(ADDR_2)             -> 0          (implementer, fully slashed)
 get_credit(ADDR_1)             -> 50000      (25000 base pay as researcher
                                                 + 25000 creator refund)
 get_credit(ADDR_3)             -> 25000      (qa, untouched)
 get_credit(ADDR_4)             -> 25000      (publisher, untouched)
+get_ledger()                   -> total_in = total_credited = 100000
 ```
+
+(To test the appeal path instead, have any registered agent call `appeal`
+with a positive value inside the window. The job settles immediately from
+whichever verdict is final, and the credits always add up to the escrow plus
+the appeal bond, never more.)
 
 If this comes back clean and matches, the entire pipeline — schema,
 deploy, address handling, live fetch, LLM verdict, consensus, and payout

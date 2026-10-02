@@ -56,7 +56,10 @@ Properties this guarantees:
   a scapegoat for pure profit beyond simply not losing one's own pay.
 
 Money is credited into `TreeMap[str, u256] credits` and pulled via
-`withdraw()` — never pushed directly from `adjudicate`/`appeal`.
+`withdraw()` — never pushed directly from `adjudicate`/`appeal`. Credits
+are written once, from the *final* verdict, when the job settles
+(`finalize` after the appeal window, or `appeal`); `adjudicate` alone
+credits nothing.
 
 ## Worked example
 
@@ -76,11 +79,15 @@ Verdict:
 | agent | share (bps) | slashed = min(25000, 100000·share/10000) | pay_i |
 |---|---|---|---|
 | researcher | 0 | 0 | 25000 |
-| implementer | 8000 | 20000 | 5000 |
-| qa | 2000 | 5000 | 20000 |
+| implementer | 8000 | 25000 (capped; uncapped 80000) | 0 |
+| qa | 2000 | 20000 | 5000 |
 | publisher | 0 | 0 | 25000 |
 
-`creator_refund = 100000 - (25000+5000+20000+25000) = 25000`.
+`creator_refund = 100000 - (25000+0+5000+25000) = 45000`.
+
+Note the scale: blame is applied against the *whole* escrow but capped at
+one agent's base pay, so with four agents any share of 2500 bps or more
+already zeroes that agent's pay.
 
 ## Verified live example
 

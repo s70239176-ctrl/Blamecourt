@@ -29,8 +29,13 @@ escrow).
 | `job_id` | `"job-001"` |
 | `spec_url` | `"https://raw.githubusercontent.com/octocat/Hello-World/master/README"` |
 | `rubric` | see below |
-| `deadline` | `"2099-01-01T00:00:00Z"` |
+| `deadline` | **now + 5 minutes**, UTC, e.g. `"2026-10-02T14:35:00Z"` |
 | `agents_json` | see below |
+
+The deadline must be a valid ISO-8601 time in the future (the call reverts
+otherwise). It is short on purpose: only two of the four roles submit an
+artifact in this scenario, so `flag_failed` is not allowed until the
+deadline has passed (step 4).
 
 `rubric` (paste as one string):
 ```
@@ -46,7 +51,7 @@ cause "non_delivery".
 `agents_json` (replace the four addresses with your own, keep it valid
 JSON on one line):
 ```json
-[{"addr":"<ADDR_A>","role":"researcher","bond":100},{"addr":"<ADDR_B>","role":"implementer","bond":100},{"addr":"<ADDR_C>","role":"qa","bond":100},{"addr":"<ADDR_D>","role":"publisher","bond":100}]
+[{"addr":"<ADDR_A>","role":"researcher"},{"addr":"<ADDR_B>","role":"implementer"},{"addr":"<ADDR_C>","role":"qa"},{"addr":"<ADDR_D>","role":"publisher"}]
 ```
 
 Note: Account A is both `creator` **and** the `researcher` agent here —
@@ -89,7 +94,15 @@ FETCH_FAILED → likely-fault-signal path actually reaches the prompt.
 |---|---|
 | `job_id` | `"job-001"` |
 
-Expect: `get_status("job-001")` now returns `"ready_for_adjudication"`.
+First call it **right away**, before the deadline. Expect a revert:
+`cannot flag yet: the deadline has not passed and not every registered
+agent has submitted an artifact`. (Only two of four roles have submitted,
+so this is the guard against judging silence as non-delivery too early.)
+
+Then wait until the deadline from step 1 has passed and call it again.
+Expect success, and `get_status("job-001")` now returns
+`"ready_for_adjudication"` (`get_job` shows `"flag_reason":
+"deadline_passed"`).
 
 ---
 
@@ -112,50 +125,58 @@ just retry.
 
 ---
 
-## 6. Inspect results
+## 6. Inspect the verdict (nothing is payable yet)
 
 ```
 get_status("job-001")      -> "adjudicated"
 get_verdict("job-001")     -> JSON string, e.g.
   {"cause":"implement_fail","evidence_used":[...],
    "rationale":"...","shares":{"<ADDR_A>":0,"<ADDR_B>":...,...}}
-get_job("job-001")         -> full job JSON, including escrow_total & agents
-get_credit("<ADDR_B>")     -> u256, the implementer's credited payout
-get_credit("<ADDR_A>")     -> u256, includes creator's refund share
+get_job("job-001")         -> full job JSON; note appeal_deadline_ts
+get_credit("<ADDR_B>")     -> 0   (every address is 0 at this point)
+get_ledger()               -> total_in=100000, total_credited=0, total_withdrawn=0
 ```
 
-With `escrow_total = 100000` and 4 agents, `base_pay = 25000` per agent
-before slashing — use that to sanity-check the numbers against whatever
-`shares` the LLM actually returned (same math as `examples.md`).
+Every `get_credit` is `0` and `withdraw` reverts with `nothing to
+withdraw`: credits are only written once the verdict is final (step 7 or
+8). Every share is a multiple of 1000 and they sum to 10000.
 
 ---
 
-## 7. `withdraw` (as whichever account has a nonzero credit)
+## 7. Either appeal (inside the 1-hour window) ...
+
+Call `appeal` as any registered agent with `job_id = "job-001"` and **value**
+set to any positive integer (e.g. `10000`) — this is the appeal bond. It
+re-runs the whole fetch+LLM pipeline from scratch and settles the job
+immediately. `get_status` ends at `"final"`. Then check `get_credit` for
+every address:
+
+- verdict **changed**: the new verdict *replaces* the old one. Credits are
+  the new distribution only (plus the refunded bond on the appellant), and
+  they add up to `escrow + bond` — never more.
+- verdict **unchanged**: the original distribution stands and the bond is
+  credited to the creator.
+
+## 8. ... or finalize (after the window)
+
+If nobody appeals, wait until `appeal_deadline_ts` (one hour after step 5)
+has passed, then call `finalize("job-001")` as anyone. Calling it earlier
+reverts with `appeal window is still open`. `get_status` becomes `"final"`
+and `get_credit` now returns each payout (`base_pay = 25000` per agent
+before slashing; see `docs/VERDICT_FORMAT.md`).
+
+## 9. `withdraw` (as whichever account has a nonzero credit)
 
 | field | value |
 |---|---|
 | *(no args)* | |
 
 Expect: their `credits` entry zeroes out and `get_credit` for that address
-returns `0` afterward. (If Studio's simulated chain doesn't actually move
-GEN on `gl.eth_send` the way a real network would, that's expected in a
-local/simulator context — the accounting side, which is what this test
-plan is checking, still updates correctly.)
-
----
-
-## 8. Optional: `appeal` (as any registered agent)
-
-| field | value |
-|---|---|
-| `job_id` | `"job-001"` |
-
-Set **value** to any positive integer (e.g. `10000`) — this is the appeal
-bond. This re-runs the whole fetch+LLM pipeline again from scratch; compare
-the new `get_verdict("job-001")` to the one from step 6. `get_status` should
-end at `"final"` either way — check `get_credit` on the appellant's address
-to see whether their bond was forfeited (verdict held) or refunded
-(verdict changed).
+returns `0` afterward. When everyone has withdrawn, `get_ledger()` shows
+`total_in == total_credited == total_withdrawn`. (If Studio's simulated
+chain doesn't actually move GEN on `gl.eth_send` the way a real network
+would, that's expected in a local/simulator context — the accounting side
+still updates correctly.)
 
 ---
 
@@ -165,7 +186,10 @@ to see whether their bond was forfeited (verdict held) or refunded
   (`duplicate job_id`).
 - Call `submit_artifact` from an account **not** in `agents_json` → expect
   `caller is not a registered agent on this job`.
-- Call `adjudicate` on a job with zero artifacts submitted → expect
-  `no artifacts submitted; nothing to adjudicate`.
-- Call `adjudicate` a second time on an already-`adjudicated` job (without
-  appealing) → expect `use appeal() instead`.
+- Call `flag_failed` or `adjudicate` before the deadline while some agent
+  has not submitted → expect `cannot flag yet` / `job must be flagged ...`.
+- Call `create_job` with `"bond"` in an agent entry → expect `agent bonds are
+  not implemented`.
+- Call `adjudicate` a second time on an already-`adjudicated` job →
+  expect `use appeal() or finalize()`.
+- Call `appeal` after the window → expect `appeal window has closed`.

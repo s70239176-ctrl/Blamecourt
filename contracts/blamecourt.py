@@ -1,6 +1,7 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 from genlayer import *
 import json
+import datetime as _dt
 
 # ----------------------------------------------------------------------
 # BlameCourt -- multi-agent blame assignment & escrow arbitration
@@ -34,6 +35,12 @@ SHARE_BPS_TOTAL = 10000
 SHARE_BUCKET_BPS = 1000
 APPEAL_SHARE_TOLERANCE_BPS = 500
 MAX_APPEALS = 1
+# Credits are NOT written to the withdrawable ledger when a verdict is
+# produced. They are written exactly once, when the verdict becomes final:
+# either an appeal resolves, or this many seconds pass with no appeal and
+# someone calls `finalize`. Until then nothing can be withdrawn, so a
+# verdict that an appeal replaces never has to be clawed back.
+APPEAL_WINDOW_SECONDS = 3600
 
 VALID_CAUSES = (
     "spec_gap",
@@ -49,8 +56,10 @@ STATUS_OPEN = "open"
 STATUS_SUBMITTED = "submitted"
 STATUS_READY = "ready_for_adjudication"
 STATUS_ADJUDICATED = "adjudicated"
-STATUS_APPEALED = "appealed"
 STATUS_FINAL = "final"
+
+FLAG_DEADLINE_PASSED = "deadline_passed"
+FLAG_ALL_SUBMITTED = "all_submitted"
 
 
 # ----------------------------------------------------------------------
@@ -83,6 +92,38 @@ def _norm_addr(addr) -> str:
     address this contract stores or compares goes through this function
     first."""
     return str(addr).strip().lower()
+
+
+def _is_hex_addr(value: str) -> bool:
+    if len(value) != 42 or not value.startswith("0x"):
+        return False
+    try:
+        int(value[2:], 16)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_ts(value) -> int:
+    """ISO-8601 -> epoch seconds. Raises on anything unparseable: a
+    deadline that cannot be read must never silently mean 'no deadline'."""
+    text = str(value).strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = _dt.datetime.fromisoformat(text)
+    except ValueError:
+        raise Exception("not a valid ISO-8601 timestamp: " + str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return int(parsed.timestamp())
+
+
+def _now_ts() -> int:
+    """Transaction time in epoch seconds, from the SDK's `message_raw`
+    (the only chain-time accessor the SDK defines). Hard-fails rather than
+    returning a default, so a missing clock can never disable a deadline."""
+    return _parse_ts(gl.message_raw["datetime"])
 
 
 def _extract_json_text(raw) -> str:
@@ -305,6 +346,14 @@ class BlameCourt(gl.Contract):
 
     job_count: u256
 
+    # Solvency ledger. `total_in` is every wei ever received (escrows and
+    # appeal bonds). `total_credited` is every wei ever made withdrawable.
+    # `total_withdrawn` is every wei ever paid out. The contract enforces
+    # total_withdrawn <= total_credited <= total_in on every write.
+    total_in: u256
+    total_credited: u256
+    total_withdrawn: u256
+
     def __init__(self):
         # `jobs` and `credits` are declared as TreeMap[...] on the class
         # body above; GenVM allocates their storage slot (and its backing
@@ -315,6 +364,9 @@ class BlameCourt(gl.Contract):
         # not match the slot's own descriptor. Only scalar fields need an
         # explicit initial value.
         self.job_count = 0
+        self.total_in = 0
+        self.total_credited = 0
+        self.total_withdrawn = 0
 
     # ------------------------------------------------------------------
     # Internal helpers (undecorated -- not part of the public ABI, so
@@ -336,31 +388,50 @@ class BlameCourt(gl.Contract):
         return agent
 
     def _credit(self, addr: str, amount: int) -> None:
-        if amount <= 0:
+        if amount < 0:
+            raise Exception("negative credit")
+        if amount == 0:
             return
         current = int(self.credits[addr]) if addr in self.credits else 0
         self.credits[addr] = current + amount
-
-    def _now_iso(self):
-        # No confirmed, version-stable chain-time accessor could be
-        # verified for this GenVM build, so deadline enforcement degrades
-        # gracefully instead of guessing an attribute name that could
-        # itself break schema/runtime reflection. flag_failed() is always
-        # the reliable way to move a job forward.
-        for attr_path in ("chain_datetime", "datetime", "timestamp"):
-            src = getattr(gl.message, attr_path, None)
-            if src is not None:
-                return src
-        return None
+        self.total_credited = int(self.total_credited) + amount
+        if int(self.total_credited) > int(self.total_in):
+            raise Exception("ledger would become insolvent")
 
     def _past_deadline(self, job: dict) -> bool:
-        now = self._now_iso()
-        if now is None:
-            return False
-        try:
-            return str(now) > job["deadline"]
-        except Exception:
-            return False
+        return _now_ts() > int(job["deadline_ts"])
+
+    def _all_agents_submitted(self, job: dict) -> bool:
+        submitters = set(a["submitter"] for a in job["artifacts"])
+        return set(job["agents"].keys()).issubset(submitters)
+
+    def _failure_condition(self, job: dict):
+        """Why this job may be declared failed right now, or None. A job
+        may only be judged once its deadline has validly passed, or once
+        every registered agent has submitted something (so the failure is
+        about the work, not about anyone's silence)."""
+        if self._past_deadline(job):
+            return FLAG_DEADLINE_PASSED
+        if self._all_agents_submitted(job):
+            return FLAG_ALL_SUBMITTED
+        return None
+
+    def _settle(self, job_id: str, job: dict) -> None:
+        """Make the final verdict withdrawable. Runs exactly once per job,
+        and only after the verdict can no longer change."""
+        if job["settled"]:
+            raise Exception("job already settled")
+        if job["verdict"] is None:
+            raise Exception("cannot settle a job with no verdict")
+        pay, creator_refund = self._compute_distribution(job, job["verdict"])
+        if sum(pay.values()) + creator_refund != int(job["escrow_total"]):
+            raise Exception("distribution does not sum to the escrow")
+        for addr, amount in pay.items():
+            self._credit(addr, amount)
+        self._credit(job["creator"], creator_refund)
+        job["settled"] = True
+        job["status"] = STATUS_FINAL
+        self._save(job_id, job)
 
     # ------------------------------------------------------------------
     # Evidence pack + LLM verdict (internal; runs inside a nondet
@@ -573,14 +644,6 @@ class BlameCourt(gl.Contract):
         creator_refund = escrow_total - sum(pay.values())
         return pay, creator_refund
 
-    def _apply_distribution(self, job: dict, sign: int) -> None:
-        if job["verdict"] is None:
-            return
-        pay, creator_refund = self._compute_distribution(job, job["verdict"])
-        for addr, amount in pay.items():
-            self._credit(addr, sign * amount)
-        self._credit(job["creator"], sign * creator_refund)
-
     # ==================================================================
     # PUBLIC ABI -- every arg/return type below is schema-safe.
     # ==================================================================
@@ -601,6 +664,12 @@ class BlameCourt(gl.Contract):
         if not rubric:
             raise Exception("rubric is required")
 
+        # The deadline is what makes silence (an agent that never submits)
+        # count as non-delivery, so it must be a real, future instant.
+        deadline_ts = _parse_ts(deadline)
+        if deadline_ts <= _now_ts():
+            raise Exception("deadline must be in the future")
+
         try:
             raw_agents = json.loads(agents_json)
         except Exception:
@@ -610,14 +679,24 @@ class BlameCourt(gl.Contract):
 
         agents = {}
         for entry in raw_agents:
-            addr = _norm_addr(entry["addr"])
-            role = str(entry["role"])
-            bond = int(entry["bond"])
-            if bond < 0:
-                raise Exception("bond must be >= 0")
+            if not isinstance(entry, dict):
+                raise Exception("each agents_json entry must be an object")
+            extra = sorted(set(entry.keys()) - set(["addr", "role"]))
+            if extra:
+                raise Exception(
+                    "unsupported agent field(s) " + str(extra)
+                    + " -- agents are {addr, role} only; agent bonds are "
+                    "not implemented"
+                )
+            addr = _norm_addr(entry.get("addr", ""))
+            role = str(entry.get("role", "")).strip()
+            if not _is_hex_addr(addr):
+                raise Exception("agent addr must be a 20-byte 0x hex address: " + addr)
+            if not role:
+                raise Exception("agent role is required")
             if addr in agents:
                 raise Exception("duplicate agent address " + addr)
-            agents[addr] = {"role": role, "bond": bond, "paid": False}
+            agents[addr] = {"role": role}
 
         escrow_total = int(gl.message.value)
         if escrow_total <= 0:
@@ -629,15 +708,20 @@ class BlameCourt(gl.Contract):
             "spec_url": spec_url,
             "rubric": rubric,
             "deadline": deadline,
+            "deadline_ts": deadline_ts,
             "escrow_total": escrow_total,
             "status": STATUS_OPEN,
+            "flag_reason": "",
             "agents": agents,
             "artifacts": [],
             "verdict": None,
             "appeal_count": 0,
+            "appeal_deadline_ts": 0,
+            "settled": False,
         }
         self._save(job_id, job)
         self.job_count = int(self.job_count) + 1
+        self.total_in = int(self.total_in) + escrow_total
 
     @gl.public.write
     def submit_artifact(self, job_id: str, url: str, kind: str) -> None:
@@ -661,7 +745,7 @@ class BlameCourt(gl.Contract):
                 "url": url,
                 "kind": kind,
                 "submitter": caller,
-                "submitted_at": str(self._now_iso() or ""),
+                "submitted_at": _now_ts(),
             }
         )
         if job["status"] == STATUS_OPEN:
@@ -674,10 +758,17 @@ class BlameCourt(gl.Contract):
         caller = _norm_addr(gl.message.sender_address)
         if caller != job["creator"] and caller not in job["agents"]:
             raise Exception("only the creator or a registered agent may flag")
-        if job["status"] in (STATUS_ADJUDICATED, STATUS_APPEALED, STATUS_FINAL):
+        if job["status"] not in (STATUS_OPEN, STATUS_SUBMITTED):
             raise Exception(
-                "job already past flagging stage ('" + job["status"] + "')"
+                "job cannot be flagged while '" + job["status"] + "'"
             )
+        reason = self._failure_condition(job)
+        if reason is None:
+            raise Exception(
+                "cannot flag yet: the deadline has not passed and not every "
+                "registered agent has submitted an artifact"
+            )
+        job["flag_reason"] = reason
         job["status"] = STATUS_READY
         self._save(job_id, job)
 
@@ -685,30 +776,29 @@ class BlameCourt(gl.Contract):
     def adjudicate(self, job_id: str) -> None:
         job = self._load(job_id)
 
-        if job["status"] != STATUS_READY:
-            if job["status"] in (STATUS_OPEN, STATUS_SUBMITTED) and self._past_deadline(
-                job
-            ):
-                pass  # allowed: past deadline is an implicit flag
-            elif job["status"] in (STATUS_OPEN, STATUS_SUBMITTED):
+        if job["status"] in (STATUS_OPEN, STATUS_SUBMITTED):
+            # Unflagged jobs may only be judged on a validated deadline.
+            # "Every agent submitted" is a completion signal that someone
+            # must still explicitly declare a failure on via flag_failed.
+            if not self._past_deadline(job):
                 raise Exception(
                     "job must be flagged (flag_failed) or past its deadline "
                     "before it can be adjudicated"
                 )
-            else:
-                raise Exception(
-                    "job already adjudicated (status='"
-                    + job["status"]
-                    + "'); use appeal() instead"
-                )
-        if len(job["artifacts"]) == 0:
-            raise Exception("no artifacts submitted; nothing to adjudicate")
+        elif job["status"] != STATUS_READY:
+            raise Exception(
+                "job already adjudicated (status='"
+                + job["status"]
+                + "'); use appeal() or finalize()"
+            )
 
         verdict = self._adjudicate_once(job)
         job["verdict"] = verdict
         job["status"] = STATUS_ADJUDICATED
+        job["appeal_deadline_ts"] = _now_ts() + APPEAL_WINDOW_SECONDS
+        # No credits here. Nothing is withdrawable until the appeal window
+        # closes (finalize) or an appeal resolves (appeal).
         self._save(job_id, job)
-        self._apply_distribution(job, 1)
 
     @gl.public.write.payable
     def appeal(self, job_id: str) -> None:
@@ -720,17 +810,17 @@ class BlameCourt(gl.Contract):
             raise Exception("can only appeal a job that is 'adjudicated'")
         if int(job["appeal_count"]) >= MAX_APPEALS:
             raise Exception("appeal limit reached")
+        if _now_ts() > int(job["appeal_deadline_ts"]):
+            raise Exception("appeal window has closed; call finalize()")
 
         appeal_bond = int(gl.message.value)
         if appeal_bond <= 0:
             raise Exception("appeal must be sent with a bond value > 0")
 
         old_verdict = job["verdict"]
-        job["status"] = STATUS_APPEALED
-        job["appeal_count"] = int(job["appeal_count"]) + 1
-        self._save(job_id, job)
-
         new_verdict = self._adjudicate_once(job)
+        self.total_in = int(self.total_in) + appeal_bond
+        job["appeal_count"] = int(job["appeal_count"]) + 1
 
         # Both verdicts' shares are already canonicalized onto the
         # SHARE_BUCKET_BPS grid (see `_quantize_shares`), so any two
@@ -747,23 +837,28 @@ class BlameCourt(gl.Contract):
             if abs(old_s - new_s) > APPEAL_SHARE_TOLERANCE_BPS:
                 same_shares = False
                 break
-        verdict_unchanged = same_cause and same_shares
 
-        if verdict_unchanged:
-            # Appeal rejected: appellant's bond is forfeited to the creator.
-            # The original distribution (already applied in adjudicate())
-            # stands untouched.
+        if same_cause and same_shares:
+            # Appeal rejected: the bond is forfeited to the creator and the
+            # original verdict stands.
             self._credit(job["creator"], appeal_bond)
         else:
-            # Appeal upheld: reverse the original distribution, apply the
-            # new one, and refund the appellant's bond.
-            self._apply_distribution(job, -1)
+            # Appeal upheld: the new verdict REPLACES the old one. Nothing
+            # was credited for the old verdict, so there is nothing to
+            # reverse and the escrow is distributed exactly once.
             job["verdict"] = new_verdict
-            self._apply_distribution(job, 1)
             self._credit(caller, appeal_bond)
 
-        job["status"] = STATUS_FINAL
-        self._save(job_id, job)
+        self._settle(job_id, job)
+
+    @gl.public.write
+    def finalize(self, job_id: str) -> None:
+        job = self._load(job_id)
+        if job["status"] != STATUS_ADJUDICATED:
+            raise Exception("only an 'adjudicated' job can be finalized")
+        if _now_ts() <= int(job["appeal_deadline_ts"]):
+            raise Exception("appeal window is still open")
+        self._settle(job_id, job)
 
     @gl.public.write
     def withdraw(self) -> None:
@@ -772,6 +867,9 @@ class BlameCourt(gl.Contract):
         if amount <= 0:
             raise Exception("nothing to withdraw")
         self.credits[caller] = 0
+        self.total_withdrawn = int(self.total_withdrawn) + amount
+        if int(self.total_withdrawn) > int(self.total_credited):
+            raise Exception("withdrawal exceeds credited funds")
         gl.eth_send(gl.message.sender_address, amount)
 
     @gl.public.view
@@ -798,6 +896,16 @@ class BlameCourt(gl.Contract):
     @gl.public.view
     def get_job_count(self) -> u256:
         return int(self.job_count)
+
+    @gl.public.view
+    def get_ledger(self) -> str:
+        return _canon(
+            {
+                "total_in": int(self.total_in),
+                "total_credited": int(self.total_credited),
+                "total_withdrawn": int(self.total_withdrawn),
+            }
+        )
 
 
 # ----------------------------------------------------------------------
@@ -832,9 +940,9 @@ class BlameCourt(gl.Contract):
 #    `self.job_count`) -- nothing computed from `gl.message.*` happens in
 #    the constructor.
 # 8. Exactly one class extends `gl.Contract`. All helper methods
-#    (`_load`, `_save`, `_require_agent`, `_credit`, `_now_iso`,
-#    `_past_deadline`, `_fetch_evidence_pack`, `_build_prompt`,
-#    `_adjudicate_once`, `_compute_distribution`, `_apply_distribution`)
+#    (`_load`, `_save`, `_require_agent`, `_credit`, `_settle`,
+#    `_past_deadline`, `_all_agents_submitted`, `_failure_condition`, `_fetch_evidence_pack`, `_build_prompt`,
+#    `_adjudicate_once`, `_compute_distribution`)
 #    are plain undecorated instance methods, never exposed with a
 #    `@gl.public.*` decorator, so they are not part of what Studio
 #    reflects into the ABI at all.

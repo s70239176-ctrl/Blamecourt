@@ -39,7 +39,9 @@ splits the problem the way GenLayer is built for:
    documented, auditable formula — never coerced or eyeballed.
 4. **Versioned, appealable state** — a verdict can be appealed once, and
    appeal re-runs the whole evidence-and-judgment pipeline independently
-   rather than trusting the first result forever.
+   rather than trusting the first result forever. Nothing is withdrawable
+   until the verdict is final, so a replaced verdict never has to be
+   clawed back.
 
 ## Core primitive
 
@@ -58,7 +60,7 @@ create_job (escrow locked)
 submit_artifact  (each agent, 0..16 per job)
       |
       v
-flag_failed  /  deadline passes
+flag_failed  (only after the deadline, or once every agent has submitted)
       |
       v
 adjudicate
@@ -67,15 +69,16 @@ adjudicate
   comparative consensus on cause + shares + evidence_used
       |
       v
-verdict stored, escrow distributed by documented formula
+verdict stored, appeal window opens (nothing is withdrawable yet)
       |
-      +----------------------+
-                             v
-                       appeal (once)
-                 re-runs the whole pipeline independently
-                             |
-                             v
-                       final distribution
+      +---------------------------+------------------------------+
+      v                           v                              v
+ window closes, no appeal    appeal (once, in window)     (appeal rejected)
+ finalize()                  re-runs the whole pipeline   bond -> creator
+      |                           |   verdict replaced           |
+      +------------+--------------+------------------------------+
+                   v
+        settled once from the final verdict -> withdraw()
 ```
 
 ## Verdict schema
@@ -144,6 +147,15 @@ genuinely "undetermined" transaction means versus a code bug.
   costly an opaque failure is.
 - Money moves only through a pull-payment ledger (`credits` +
   `withdraw()`), never a direct push transfer out of `adjudicate`/`appeal`.
+- Credits are written exactly once per job, from the final verdict, so an
+  upheld appeal replaces the original distribution instead of adding to
+  it. A ledger (`total_in` >= `total_credited` >= `total_withdrawn`) is
+  enforced on every write and readable via `get_ledger()`.
+- A job cannot be flagged as failed (and so cannot have silence judged as
+  non-delivery) before its validated deadline, unless every agent has
+  already submitted.
+- Agents are `{addr, role}`. There are no agent bonds; `create_job`
+  rejects the field rather than ignoring it.
 
 ## Repository layout
 
@@ -156,6 +168,7 @@ docs/INTEGRATION.md                 How another contract/orchestrator should cal
 fixtures/                           Example agents_json + rubric used in tests/docs
 scripts/preflight.py                Static structural checks (schema-safety, class shape)
 scripts/deploy_studionet.sh         Minimal Studio/StudioNet deploy helper
+tests/unit/                         Money-flow/solvency tests, plain pytest + SDK stub
 tests/direct/                       gltest suite with mocked web + mocked LLM
 tests/integration/                  Manual Studio walkthroughs (no mocks -- live fetch/LLM)
 SUBMISSION.md                       Build log: known API guesses, verified runs, open issues
@@ -168,6 +181,14 @@ have caught the schema-nesting bug documented in `SUBMISSION.md` before
 ever deploying):
 ```
 python scripts/preflight.py contracts/blamecourt.py
+```
+
+Run the money-flow and solvency tests (plain pytest; they execute the
+real `contracts/blamecourt.py` against a small in-process SDK stand-in, so
+no GenVM is needed):
+```
+pip install pytest
+pytest tests/unit -q
 ```
 
 Run the mocked gltest suite:

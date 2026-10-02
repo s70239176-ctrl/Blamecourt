@@ -8,7 +8,7 @@ networks:
     url: "http://127.0.0.1:4000/api"
     leader_only: false
 
-  studionet:
+  studionet: {}
     # Pre-configured by genlayer-test -- accounts auto-generated
 
 paths:
