@@ -130,10 +130,22 @@ the scenario's predicted verdict exactly:
 }
 ```
 
-No separate contract address or deploy-transaction hash is recorded here
-— this repo does not itself hold a persistent Studio/StudioNet deployment,
-and one shouldn't be claimed without being independently re-verifiable by
-a reviewer running the steps in `tests/integration/` themselves.
+## Deployment
+
+Studio (studionet) address of the current revision (the escrow-safety
+revision, with `finalize` and `get_ledger`):
+
+```
+0x987165A94d2E865fd04291Dd495ec0a4c719740b
+```
+
+This is independently checkable rather than asserted. Against
+`https://studio.genlayer.com/api`, `gen_getContractSchema` for that address
+lists the 13 public methods in `contracts/blamecourt.py`, and
+`gen_getContractCode` returns the contract source (base64), which was
+compared with this repo's `contracts/blamecourt.py` and is identical. The
+verdict below came from an earlier deployment of the low-ambiguity
+walkthrough, not from this address.
 
 ## Known open issue: "transaction ended undetermined"
 
