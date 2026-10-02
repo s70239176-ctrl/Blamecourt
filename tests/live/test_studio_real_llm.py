@@ -58,12 +58,25 @@ def _why(receipt):
     return " || ".join(hits) or text[:1200]
 
 
+_STEPS = [0]
+
+
+def _step(kind, receipt):
+    _STEPS[0] += 1
+    print(
+        "[step %d] %s tx=%s" % (_STEPS[0], kind, (receipt or {}).get("hash")),
+        flush=True,
+    )
+
+
 def _ok(receipt):
     assert tx_execution_succeeded(receipt), _why(receipt)
+    _step("ok", receipt)
 
 
 def _refused(receipt, pattern):
     assert tx_execution_failed(receipt, match_std_err=pattern), _why(receipt)
+    _step("refused as expected (%s)" % pattern, receipt)
 
 
 def _contract(accounts):
@@ -232,7 +245,8 @@ def test_finalize_path_on_real_validators(accounts):
     assert _credits(contract, accounts) == [0, 0, 0, 0]
     ledger = _ledger(contract)
     assert ledger["total_withdrawn"] - withdrawn0 == sum(owed_now)
-    assert ledger["total_in"] - ledger0["total_in"] == ESCROW
+    # ledger0 was taken after the deposit, so nothing new came in since.
+    assert ledger["total_in"] == ledger0["total_in"]
     assert ledger["total_withdrawn"] <= ledger["total_credited"] <= ledger["total_in"]
 
 
@@ -256,7 +270,7 @@ def test_appeal_path_on_real_validators_never_overpays(accounts):
     got = _delta(_credits(contract, accounts), credits0)
     assert sum(got) == ESCROW + bond, got
     ledger = _ledger(contract)
-    assert ledger["total_in"] - ledger0["total_in"] == ESCROW + bond
+    assert ledger["total_in"] - ledger0["total_in"] == bond  # escrow was in ledger0
     assert ledger["total_credited"] - ledger0["total_credited"] == ESCROW + bond
 
     # No second appeal, no second settlement.

@@ -232,6 +232,39 @@ def _quantize_shares(shares: dict, bucket_bps: int, total_bps: int) -> dict:
     return {a: units[a] * bucket_bps for a in addrs}
 
 
+def _same_decision(mine, theirs, known_urls) -> bool:
+    """Validator-side agreement check, in plain code rather than an LLM
+    judge. Two verdicts agree iff they name the same `cause` and have
+    EXACTLY the same canonical `shares` for the same agents, and the
+    leader's cited evidence was really in the evidence pack. `rationale` and
+    the exact set of URLs cited are free text / presentation and are ignored.
+    Because `shares` is what `_compute_distribution` pays out, agreement here
+    is agreement on the money -- it cannot be argued around by a model that
+    misreads an instruction."""
+    if not isinstance(mine, dict) or not isinstance(theirs, dict):
+        return False
+    cause = mine.get("cause")
+    if cause not in VALID_CAUSES or cause != theirs.get("cause"):
+        return False
+    my_shares = mine.get("shares")
+    their_shares = theirs.get("shares")
+    if not isinstance(my_shares, dict) or not isinstance(their_shares, dict):
+        return False
+    if not my_shares:
+        return False
+    try:
+        a = {_norm_addr(k): int(v) for k, v in my_shares.items()}
+        b = {_norm_addr(k): int(v) for k, v in their_shares.items()}
+    except (TypeError, ValueError):
+        return False
+    if a != b:
+        return False
+    cited = theirs.get("evidence_used") or []
+    if not isinstance(cited, list):
+        return False
+    return all(isinstance(u, str) and u in known_urls for u in cited)
+
+
 def _fetch_evidence_pack(spec_url, artifacts):
     """Runs INSIDE a nondet context. Deliberately a module-level function,
     NOT a bound method -- a bound method (`self._fetch_evidence_pack`)
@@ -436,7 +469,7 @@ class BlameCourt(gl.Contract):
     # ------------------------------------------------------------------
     # Evidence pack + LLM verdict (internal; runs inside a nondet
     # closure). All values the closure needs are copied into plain local
-    # variables BEFORE the eq_principle call, so the nondet block never
+    # variables BEFORE the consensus call, so the nondet block never
     # touches self.jobs / self.credits directly. The actual fetch/prompt
     # helper functions live at module scope above (see
     # `_fetch_evidence_pack` / `_build_prompt`), NOT as methods here --
@@ -449,7 +482,7 @@ class BlameCourt(gl.Contract):
         the decision fields only. Returns the accepted verdict dict."""
 
         # Copy everything the nondet closure needs into plain local
-        # variables BEFORE the eq_principle call -- the closure must not
+        # variables BEFORE the consensus call -- the closure must not
         # reference self / storage.
         spec_url = job["spec_url"]
         rubric = job["rubric"]
@@ -518,42 +551,26 @@ class BlameCourt(gl.Contract):
 
             return _canon(parsed)
 
-        # Comparative equivalence: validators independently re-run the fetch
-        # + LLM step and vote on whether their own result is EQUIVALENT to
-        # the leader's. strict_eq is deliberately NOT used here: two
-        # independent LLM calls over live web text will not produce
-        # byte-identical JSON, so strict_eq would make honest validators
-        # disagree by construction. prompt_comparative lets validators agree
-        # on the fields that matter (cause, shares, evidence_used) while
-        # explicitly ignoring free-text rationale.
-        principle = (
-            "Two JSON blame verdicts are EQUIVALENT if and only if ALL of the "
-            "following hold:\n"
-            "1. Their `cause` fields are identical strings.\n"
-            "2. Their `shares` objects have the same set of address keys "
-            "(compare address keys CASE-INSENSITIVELY -- '0xAbC...' and "
-            "'0xabc...' refer to the same address and must be treated as the "
-            "same key). Each verdict's `shares` values have already been "
-            "canonicalized by its own producer onto a fixed "
-            + str(SHARE_BUCKET_BPS) + "-bps grid before you see them -- "
-            "compare those values for EXACT equality, address by address. Do "
-            "NOT treat two different values as 'close enough'; the values you "
-            "are comparing are the same numbers that determine the payout, so "
-            "a difference of even one bucket is a real disagreement about "
-            "blame, not rounding noise, and must make the verdicts "
-            "non-equivalent.\n"
-            "3. Every URL in `evidence_used` in EITHER verdict actually appears "
-            "in the evidence pack's known URL list; a verdict that cites a URL "
-            "not in the known list is INVALID and must NOT be treated as "
-            "equivalent to a valid one.\n"
-            "Ignore the `rationale` field entirely -- differences in wording, "
-            "length, or phrasing of `rationale` must never cause two verdicts to "
-            "be judged non-equivalent."
-        )
+        # Leader/validator consensus with a deterministic comparator. The leader
+        # runs the fetch + LLM step; each validator independently re-runs it
+        # and agrees only if `_same_decision` holds: same cause and EXACTLY
+        # the same canonical shares. No LLM judges "equivalence" -- that made
+        # agreement depend on a model following an instruction, and on
+        # heterogeneous validators it also produced spurious disagreements.
+        known_urls = set([spec_url] + [a["url"] for a in artifacts])
 
-        accepted_json = gl.eq_principle.prompt_comparative(
-            produce_verdict, principle=principle
-        )
+        def leader_fn() -> str:
+            return produce_verdict()
+
+        def validator_fn(leaders_result) -> bool:
+            try:
+                theirs = json.loads(gl.vm.unpack_result(leaders_result))
+                mine = json.loads(gl.vm.unpack_result(gl.vm.spawn_sandbox(produce_verdict)))
+            except Exception:
+                return False
+            return _same_decision(mine, theirs, known_urls)
+
+        accepted_json = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
         try:
             accepted = json.loads(accepted_json)
         except Exception:

@@ -57,6 +57,15 @@ Review found three problems, all fixed in `contracts/blamecourt.py`:
 
 `tests/unit/` covers each of these.
 
+### Found by running against live Studio
+
+4. **`withdraw()` could never pay out** — it called `gl.eth_send`, which does
+   not exist in the SDK (`AttributeError` on a real chain). Now
+   `gl.get_contract_at(addr).emit_transfer(value=...)`.
+5. **Spurious `MAJORITY_DISAGREE`** — see `docs/CONSENSUS.md`. Agreement is now
+   a code-level comparison (`_same_decision`) on the canonical shares instead
+   of an LLM-judged equivalence. `tests/unit/test_consensus.py` covers it.
+
 ## Bugs hit and fixed during development (in order)
 
 This list exists because several of these were structural bugs that

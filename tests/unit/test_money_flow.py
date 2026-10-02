@@ -373,7 +373,8 @@ def test_random_scenarios_never_overpay(world):
         bond = 0
         if rng.random() < 0.6:
             bond = rng.randint(1, 10**6)
-            world.llm = lambda p: verdict(random_split(), "multi")
+            appeal_split = random_split()  # one scripted answer per round
+            world.llm = lambda p, s=appeal_split: verdict(s, "multi")
             world.datetime = seconds_after(AFTER_DEADLINE, 60)
             call(c, rng.choice(AGENTS), "appeal", "j1", value=bond)
         else:

@@ -34,7 +34,8 @@ splits the problem the way GenLayer is built for:
    artifact URLs are fetched fresh, inside the same consensus round, not
    taken from anyone's say-so.
 2. **GenLayer consensus** resolves a bounded blame-assignment decision
-   from that evidence via `gl.eq_principle.prompt_comparative`.
+   from that evidence via `gl.vm.run_nondet_unsafe`, with validators
+   comparing the canonical payout shares in code.
 3. **Deterministic settlement** computes exactly who gets paid, by a
    documented, auditable formula — never coerced or eyeballed.
 4. **Versioned, appealable state** — a verdict can be appealed once, and
@@ -97,26 +98,29 @@ reference, the distribution formula, and worked examples.
 
 ## What consensus actually does
 
-BlameCourt uses `gl.eq_principle.prompt_comparative`, not `strict_eq`,
-because the non-deterministic step is "fetch live pages, then have an LLM
-write free-form rationale plus a structured verdict" — two honest
-validators running that independently will not produce byte-identical
-JSON. `strict_eq` would make honest validators disagree by construction.
+BlameCourt uses `gl.vm.run_nondet_unsafe` with a leader function and a
+**validator function written in plain code** (`_same_decision`), not
+`strict_eq` and not an LLM judge. The non-deterministic step is "fetch live
+pages, then have an LLM write free-form rationale plus a structured verdict",
+so two honest validators will never produce byte-identical JSON — `strict_eq`
+would make them disagree by construction. But asking *another* LLM to decide
+whether two verdicts are "equivalent" (`prompt_comparative`) made agreement
+depend on a model following an instruction, and on validators running
+different model families it produced spurious disagreements.
 
-Validators are told two verdicts are equivalent iff:
+Each validator independently re-runs the fetch + LLM step and agrees with the
+leader iff:
 - `cause` is an identical string;
-- `shares` cover the same agent addresses (compared case-insensitively)
-  and are, address by address, EXACTLY equal — each producer
-  canonicalizes its own raw shares onto a fixed 1000-bps grid (largest-
-  remainder apportionment) before this comparison, so the numbers being
-  compared are the same numbers `_compute_distribution` will pay out; a
-  tolerance on the *raw* numbers can't bound the payout once only one
-  side's numbers are the ones actually spent, so none is used here (see
+- `shares` cover the same agent addresses (case-insensitively) and are,
+  address by address, EXACTLY equal. Each producer first canonicalizes its own
+  raw shares onto a fixed 1000-bps grid (largest-remainder apportionment), so
+  the numbers compared are the same numbers `_compute_distribution` pays out.
+  A tolerance on the *raw* numbers cannot bound the payout once only one
+  side's numbers are the ones actually spent, so none is used (see
   [docs/CONSENSUS.md](docs/CONSENSUS.md));
-- every `evidence_used` URL in either verdict was actually part of the
-  fetched evidence pack — a citation of an unfetched URL invalidates that
-  verdict, it does not just make it "different";
-- `rationale` wording is ignored entirely.
+- every `evidence_used` URL the leader cites was actually in the fetched
+  evidence pack;
+- `rationale` wording and the exact set of URLs cited are ignored.
 
 After consensus, a second, fully deterministic, storage-touching pass
 re-validates the accepted payload (enum membership, exact key-set match,

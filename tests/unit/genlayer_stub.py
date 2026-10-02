@@ -75,6 +75,32 @@ def _prompt_comparative(fn, principle=""):
     return fn()
 
 
+class _Return:
+    def __init__(self, calldata):
+        self.calldata = calldata
+
+
+class _Disagree(Exception):
+    pass
+
+
+def _spawn_sandbox(fn):
+    return _Return(fn())
+
+
+def _unpack_result(res):
+    return res.calldata
+
+
+def _run_nondet_unsafe(leader_fn, validator_fn):
+    """Leader runs, then the validator checks the leader's result. Like the
+    real GenVM, a False verdict terminates the call (here: raises)."""
+    result = leader_fn()
+    if not validator_fn(_Return(result)):
+        raise _Disagree("validators disagree with the leader")
+    return result
+
+
 class _ContractAt:
     def __init__(self, addr):
         self.addr = addr
@@ -90,6 +116,12 @@ gl = types.SimpleNamespace(
     public=_Public,
     message=_Message,
     get_contract_at=_ContractAt,
+    vm=types.SimpleNamespace(
+        Return=_Return,
+        spawn_sandbox=_spawn_sandbox,
+        unpack_result=_unpack_result,
+        run_nondet_unsafe=_run_nondet_unsafe,
+    ),
     eq_principle=types.SimpleNamespace(prompt_comparative=_prompt_comparative),
     nondet=types.SimpleNamespace(
         web=types.SimpleNamespace(render=_render), exec_prompt=_exec_prompt

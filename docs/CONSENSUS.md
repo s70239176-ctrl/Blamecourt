@@ -1,27 +1,46 @@
 # Consensus design
 
-## Why `prompt_comparative`, not `strict_eq`
+## Why a code-level validator, not `strict_eq` or an LLM judge
 
 The non-deterministic step in `adjudicate()` is "fetch live pages, then
 have an LLM write free-form rationale plus a structured verdict." Two
 honest validators running that independently will not produce
 byte-identical JSON — key order, rationale wording, and minor rounding
 differences are expected even when both are *correct*. `strict_eq` would
-make honest validators disagree with each other by construction, so it is
-never used on the output of `produce_verdict`.
+make honest validators disagree with each other by construction.
 
-`gl.eq_principle.prompt_comparative` is used instead, with a principle
-that tells validators two verdicts are equivalent iff:
+The first revision used `gl.eq_principle.prompt_comparative`, which has an
+LLM decide whether two verdicts are "equivalent" under a written principle.
+Two problems showed up on live Studio:
 
-1. `cause` fields are identical strings.
-2. `shares` objects cover the same agent addresses — **compared
-   case-insensitively**, since LLMs sometimes reformat hex address casing
-   (e.g. to an EIP-55 checksum) even when explicitly told not to — and,
-   address by address, are **EXACTLY equal**.
-3. Every `evidence_used` URL in either verdict actually appears in the
-   evidence pack's known-URL list. A verdict citing an unfetched URL is
-   invalid, not merely "different."
-4. `rationale` wording is ignored entirely.
+1. **It cannot guarantee what the principle says.** "Compare the shares for
+   exact equality" is an instruction to a model, not a check. The payout
+   depends on `shares`, so the guarantee a reviewer asked for — validators
+   bind the exact payout-driving numbers — should not depend on a model
+   following it.
+2. **It disagreed spuriously.** On the clear-cut single-fault scenario, the
+   leader produced exactly the right verdict (`implement_fail`, 10000 bps to
+   the implementer) and the transaction still finalized as
+   `MAJORITY_DISAGREE` after three leader rotations, with the network's
+   validators (different model families) voting 3 disagree / 1 agree / 1
+   idle. No state changed and the job stayed `ready_for_adjudication`.
+
+`adjudicate()` and `appeal()` now use `gl.vm.run_nondet_unsafe(leader_fn,
+validator_fn)`. The leader runs the fetch + LLM step. Each validator re-runs
+it and calls `_same_decision(mine, leaders)`, a pure function that returns
+true iff:
+
+1. `cause` is identical and a member of the fixed enum;
+2. `shares` has the same agents (**compared case-insensitively**, since LLMs
+   sometimes reformat hex address casing) and, address by address, is
+   **EXACTLY equal**, and is non-empty;
+3. every `evidence_used` URL the leader cites is in the evidence pack's
+   known-URL list (a verdict citing an unfetched URL is rejected, not merely
+   "different").
+
+`rationale` and the exact set of URLs cited are ignored. An unusable answer
+(unparseable, empty `shares`) is a disagreement, so the leader rotates
+instead of the transaction failing after consensus.
 
 ### Why exact equality on `shares`, not a numeric tolerance
 
@@ -45,8 +64,8 @@ sit on opposite sides of an arbitrary payout threshold. Instead,
 confirmed they already look sane (right keys, non-negative, sums to
 ~10000) — onto a fixed `SHARE_BUCKET_BPS` (1000) grid via
 `_quantize_shares`, a deterministic largest-remainder apportionment, in
-`contracts/blamecourt.py`, *before* the verdict is handed to
-`prompt_comparative`. Two independent LLM calls over the same evidence
+`contracts/blamecourt.py`, *before* the verdict is returned to
+consensus. Two independent LLM calls over the same evidence
 almost always quantize to the identical allocation even though their raw
 bps never matched exactly; validators then compare those canonical
 values for exact equality. Whichever verdict passes consensus, its
